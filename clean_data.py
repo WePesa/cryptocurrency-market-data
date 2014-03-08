@@ -75,19 +75,39 @@ def clean_book(book_data, market_price, bid_currency, quote_currency):
             "bid_currency": bid_currency,
             "quote_currency": quote_currency,
             "time": time_point}, ["bids", "asks"]):
+            if (len(record['bids']) > 0
+                and len(record['asks']) > 0):
+                max_bid = record['bids'][0][0]
+                min_ask = record['asks'][0][0]
+                if (max_bid > min_ask):
+                    # Warn the user about mangled data?
+                    continue
+            
             for bid in record['bids']:
                 collated_bids.append([Decimal(bid[0]), Decimal(bid[1])])
                 
             for ask in record['asks']:
                 collated_asks.append([Decimal(ask[0]), Decimal(ask[1])])
+            
                 
         # Get naive bid, ask, mid
         collated_asks = sorted(collated_asks, key=lambda ask: ask[0])
         collated_bids = sorted(collated_bids, key=lambda bid: bid[0], reverse=True)
         
-        simple_ask = collated_asks[0][0]
-        simple_bid = collated_bids[0][0]
-        simple_mid = ((simple_ask + simple_bid) / 2).quantize(Decimal('.00000001'), rounding=ROUND_HALF_UP)
+        if (len(collated_asks) > 0):
+            simple_ask = collated_asks[0][0]
+        else:
+            simple_ask = None
+            
+        if (len(collated_bids) > 0):
+            simple_bid = collated_bids[0][0]
+        else:
+            simple_bid = None
+            
+        if (simple_ask is None or simple_bid is None):
+            simple_mid = None
+        else:
+            simple_mid = ((simple_ask + simple_bid) / 2).quantize(Decimal('.00000001'), rounding=ROUND_HALF_UP)
             
         # Cut very low volumes
         collated_asks = sorted(collated_asks, key=lambda ask: ask[1])
@@ -99,19 +119,37 @@ def clean_book(book_data, market_price, bid_currency, quote_currency):
         collated_asks = sorted(collated_asks, key=lambda ask: ask[0])
         collated_bids = sorted(collated_bids, key=lambda bid: bid[0], reverse=True)
         
-        filtered_ask = collated_asks[0][0]
-        filtered_bid = collated_bids[0][0]
-        filtered_mid = ((filtered_ask + filtered_bid) / 2).quantize(Decimal('.00000001'), rounding=ROUND_HALF_UP)        
+        if (len(collated_asks) > 0):
+            filtered_ask = collated_asks[0][0]
+        else:
+            filtered_ask = None
+            
+        if (len(collated_bids) > 0):
+            filtered_bid = collated_bids[0][0]
+        else:
+            filtered_bid = None
         
-        market_price.insert({"bid_currency": bid_currency,
+        # Calculate mid from bid/ask if available
+        if (filtered_ask is None or filtered_bid is None):
+            filtered_mid = None
+        else:
+            filtered_mid = ((filtered_ask + filtered_bid) / 2).quantize(Decimal('.00000001'), rounding=ROUND_HALF_UP)        
+        
+        # Assemble the price record to be inserted into the database
+        price = {"bid_currency": bid_currency,
 	    "quote_currency": quote_currency,
             "time": time_point,
             "ask": str(simple_ask),
             "bid": str(simple_bid),
             "mid": str(simple_mid),
             "filtered_ask": str(filtered_ask),
-            "filtered_bid": str(filtered_bid),
-            "filtered_mid": str(filtered_mid)})
+            "filtered_bid": str(filtered_bid)}
+            
+        if (simple_mid is not None):
+            price["simple_mid"] = str(simple_mid)
+            price["filtered_mid"] = str(filtered_mid)
+            
+        market_price.insert(price)
 
 client = MongoClient()
 
