@@ -1,139 +1,67 @@
 #!/usr/bin/python3.2
 
 import pymongo
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import *
-import json
 from pymongo import MongoClient
 import pprint
 import math
+import pygal
 
-# Slices the given list down to the top n% only
-def confidence_interval_top(data, interval):
-    new_length = math.ceil(len(data) * interval)
-    
-    if (new_length == len(data)):
-        return data
-    
-    return data[: new_length]
+def daterange(start_time, end_time, bar_period_minutes):
+    interval = end_time - start_time
+    interval_minutes = interval.days * 24 * 60 + math.floor(interval.seconds / 60)
 
-# Calculates weighted mean from a set of market depth data
-def weighted_mean(depth):
-    total = 0
-    weight = 0
-    
-    for record in depth:
-        total += (record[0] * record[1])
-        weight += record[1]
-    
-    if (weight == Decimal(0)):
-        return weight
-    else:
-        return total / weight
-    
-def clean_book(book_data, market_price, bid_currency, quote_currency):
-    start_time = None
+    for n in range(int(interval_minutes / bar_period_minutes)):
+        yield start_time + timedelta(0, 0, 0, 0, n * bar_period_minutes)
 
-    for record in market_price.find({
-        "bid_currency": bid_currency,
-        "quote_currency": quote_currency
-        }).sort("time", -1):
-        start_time = record['time']
-        break
-
-    if start_time is None:
-        for record in book_data.find({
-        "bid_currency": bid_currency,
-        "quote_currency": quote_currency
-        }).sort("time", 1):
-            start_time = record['time']
-            break
-
-    if start_time is None:
-        print ("No data to clean.")
-        exit
-        
-    time_points = []
+def get_periodic_price_data(market_price, bid_currency, quote_currency,
+    start_time, end_time, bar_period_minutes):
+    bar_period = timedelta(0, 0, 0, 0, bar_period_minutes)
+    prices = []
+    period_start = start_time
+    period_end = start_time + bar_period
     
-    for time_point in book_data.find(
+    for price in market_price.find(
         {
             "bid_currency": bid_currency,
             "quote_currency": quote_currency,
-            "time": {"$gte": start_time}
+            "time": {"$gte": start_time},
+            "time": {"$lte": end_time}
         },
-        ["time"]
+        {
+            "time": 1,
+            "filtered_mid": 1
+        }
     ):
-        time_points.append(time_point['time'])
-        
-    pp = pprint.PrettyPrinter(indent=4)
-    
-    for time_point in set(time_points):
-        collated_asks = []
-        collated_bids = []
-    
-        for record in book_data.find({
-            "bid_currency": bid_currency,
-            "quote_currency": quote_currency,
-            "time": time_point}, ["bids", "asks"]):
-            for bid in record['bids']:
-                collated_bids.append([Decimal(bid[0]), Decimal(bid[1])])
-                
-            for ask in record['asks']:
-                collated_asks.append([Decimal(ask[0]), Decimal(ask[1])])
-                
-        # Get naive bid, ask, mid
-        collated_asks = sorted(collated_asks, key=lambda ask: ask[0])
-        collated_bids = sorted(collated_bids, key=lambda bid: bid[0], reverse=True)
-        
-        simple_ask = collated_asks[0][0]
-        simple_bid = collated_bids[0][0]
-        simple_mid = ((simple_ask + simple_bid) / 2).quantize(Decimal('.00000001'), rounding=ROUND_HALF_UP)
+        prices.append(float(price["filtered_mid"]))
             
-        # Cut very low volumes
-        collated_asks = sorted(collated_asks, key=lambda ask: ask[1])
-        collated_bids = sorted(collated_bids, key=lambda bid: bid[1])
-        
-        collated_asks = confidence_interval_top(collated_asks, 0.95)
-        collated_bids = confidence_interval_top(collated_bids, 0.95)
-            
-        collated_asks = sorted(collated_asks, key=lambda ask: ask[0])
-        collated_bids = sorted(collated_bids, key=lambda bid: bid[0], reverse=True)
-        
-        filtered_ask = collated_asks[0][0]
-        filtered_bid = collated_bids[0][0]
-        filtered_mid = ((filtered_ask + filtered_bid) / 2).quantize(Decimal('.00000001'), rounding=ROUND_HALF_UP)        
-        
-        market_price.insert({"bid_currency": bid_currency,
-	    "quote_currency": quote_currency,
-            "time": time_point,
-            "ask": str(simple_ask),
-            "bid": str(simple_bid),
-            "mid": str(simple_mid),
-            "filtered_ask": str(filtered_ask),
-            "filtered_bid": str(filtered_bid),
-            "filtered_mid": str(filtered_mid)})
+    return prices
+    
+def plot_bollinger_bands(market_price, bid_currency, quote_currency,
+    bar_period_minutes, sample_size_bars, graph_length_bars):
+    end_time = datetime.utcnow()
+    end_time = datetime(end_time.year, end_time.month, end_time.day,
+        end_time.hour, end_time.minute - (end_time.minute % bar_period_minutes))
+    start_time = end_time - timedelta(0, 0, 0, 0, bar_period_minutes * graph_length_bars)
+    
+    prices = get_periodic_price_data(market_price, bid_currency, quote_currency,
+        start_time, end_time, bar_period_minutes)
+    
+    line_chart = pygal.Line()
+    line_chart.title = bid_currency + '/' + quote_currency + ' Rate'
+    line_chart.x_labels = map(str, daterange(start_time, end_time, bar_period_minutes))
+    line_chart.add(bid_currency + '/' + quote_currency, prices)
+    line_chart.render_to_file('bar_chart.svg')
+
 
 client = MongoClient()
 
 market_data_db = client.market_data
-book_data = market_data_db.book
 market_price = market_data_db.market_price
 
+# Plot DOGE/BTC in 4 minute data, sampling Bollinger Bands from 40 data points, 
+# across a half-day (12 hours) range
+plot_bollinger_bands(market_price, "DOGE", "BTC", 4, 40, (int)(12 * 60 / 4))
 
-book_data.ensure_index(
-    [
-        ("bid_currency", pymongo.DESCENDING),
-        ("quote_currency", pymongo.DESCENDING)
-    ])
-book_data.ensure_index("time")
-market_price.ensure_index(
-    [
-        ("bid_currency", pymongo.DESCENDING),
-        ("quote_currency", pymongo.DESCENDING)
-    ])
-market_price.ensure_index("time")
-
-clean_book(book_data, market_price, "DOGE", "BTC")
-clean_book(book_data, market_price, "DOGE", "USD")
-clean_book(book_data, market_price, "VTC", "BTC")
 
